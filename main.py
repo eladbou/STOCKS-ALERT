@@ -386,7 +386,7 @@ async def on_startup():
             user=DB_USER,
             password=DB_PASSWORD,
             min_size=1,
-            max_size=10
+            max_size=10,
             ssl="require"
         )
         logger.info("Database connection pool created successfully.")
