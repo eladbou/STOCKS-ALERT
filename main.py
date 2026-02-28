@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import asyncio
 import logging
@@ -386,6 +387,7 @@ async def on_startup():
             password=DB_PASSWORD,
             min_size=1,
             max_size=10
+            ssl="require"
         )
         logger.info("Database connection pool created successfully.")
     except Exception as e:
