@@ -386,7 +386,7 @@ async def on_startup():
             user=DB_USER,
             password=DB_PASSWORD,
             min_size=1,
-            max_size=10
+            max_size=10,
             ssl="require",
             statement_cache_size=0
         )
