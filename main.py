@@ -343,10 +343,10 @@ async def check_stocks_and_notify():
                     if triggered:
                         # Send message using Telegram Bot
                         msg = (
-                            f"🚨 <b>Stock Limit Reached!</b> 🚨\n\n"
-                            f"📈 <b>{symbol}</b> has crossed your target.\n"
-                            f"💰 Current Price: <b>${current_price:.2f}</b>\n"
-                            f"🎯 Target Set: <b>${threshold:.2f}</b> ({condition})"
+                            f"🚨 <b>קפצה התראה!</b> 🚨\n\n"
+                            f"📈 <b>{symbol}</b> הגיעה למחיר היעד.\n"
+                            f"💰 מחיר נוכחי: <b>${current_price:.2f}</b>\n"
+                            f"🎯 מחיר ההתרעה: <b>${threshold:.2f}</b> ({condition})"
                         )
                         
                         try:
