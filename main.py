@@ -15,6 +15,8 @@ import asyncpg
 from dotenv import load_dotenv
 import re
 import requests
+# from datetime import datetime
+# import pytz
 
 # Load environment variables from .env file if present
 load_dotenv()
@@ -103,16 +105,43 @@ async def cmd_status(message: Message):
 @dp.message(Command("help"))
 @dp.message(F.text.lower() == "help")
 async def cmd_help(message: Message):
+    global db_pool
+    greeting = "🤖 <b>ברוכים הבאים לבוט התראות הבורסה!</b> 🚀"
+    
+    if db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                user = await conn.fetchrow("SELECT id FROM users WHERE telegram_chat_id = $1", str(message.chat.id))
+                if user:
+                    user_id = user['id']
+                    if user_id == 1:
+                        greeting = "👑 <b>שלום אלעד מלכי</b>"
+                    elif user_id == 2:
+                        greeting = "🤡 <b>שלום ארביב הליצן</b>"
+                    elif user_id == 3:
+                        greeting = "🌈 <b>שלום הלל ההומו</b>"
+        except Exception:
+            pass # Fallback to default greeting if DB fails
+
     help_text = (
-        "🤖 <b>מדריך פקודות לבוט התראות המניות:</b>\n\n"
-        "🔗 <b>/status</b> - בדיקת מצב החשבון וכמות התראות פעילות.\n\n"
-        "🔔 <b>ניהול התראות:</b>\n"
-        "• <code>add [SYMBOL] [PRICE]</code> או פשוט <code>AAPL 150</code> - הוספת התראה חדשה.\n"
-        "• <code>list</code> - הצגת כל ההתראות הפעילות שלך.\n"
-        "• <code>del [ID]</code> / <code>delete [ID]</code> / <code>remove [ID]</code> - מחיקת התראה לפי מספר ID (אותו מקבלים מפקודת list).\n\n"
-        "🔍 <b>בדיקות וחיפושים:</b>\n"
-        "• <code>price [SYMBOL]</code> - בדיקת המחיר הנוכחי של מניה ללא שמירת התראה.\n"
-        "• <code>search [QUERY]</code> - חיפוש מניה לפי שם או ביטוי."
+        f"{greeting}\n\n"
+        "הנה כל מה שאתה יכול לעשות עם הבוט:\n\n"
+        "📌 <b>חשבון וכללי</b>\n"
+        "• <code>status</code> - בדיקת חיבור ומצב התראות\n"
+        "• <code>help</code> - הצגת מדריך הפקודות הזה\n\n"
+        "🔔 <b>ניהול התראות מחיר</b>\n"
+        "• <code>[SYMBOL] [PRICE]</code> - הוספת התראה למחיר ספציפי\n"
+        "  <i>לדוגמה: <code>AAPL 230</code></i>\n"
+        "• <code>list</code> - הצגת כל ההתראות הפעילות שלך\n"
+        "• <code>del [ID]</code> - מחיקת התראה (השתמש ב-ID מפקודת list)\n\n"
+        "📊 <b>חדש! התראות ממוצע נע (SMA) בשביל ארביבון</b>\n"
+        "• <code>add [SYMBOL] SMA [PERIOD]</code> - התראה כשהמחיר נוגע בממוצע\n"
+        "  <i>לדוגמה: <code>NVDA SMA 50</code></i>\n"
+        "  הבוט יתריע כשהמחיר יתקרב לטווח של 0.5% מהממוצע.\n\n"
+        "🔍 <b>מידע וחיפוש</b>\n"
+        "• <code>price [SYMBOL]</code> - קבלת מחיר נוכחי ומהיר\n"
+        "• <code>search [NAME]</code> - חיפוש סימול לפי שם חברה (בעברית/אנגלית)\n\n"
+        "💡 <b>טיפ:</b> ניתן להוסיף התראה רגילה פשוט על ידי כתיבת שם המניה והמחיר, ללא המילה add."
     )
     await message.answer(help_text)
 
@@ -150,12 +179,31 @@ async def cmd_list(message: Message):
             await message.answer("אין לך התראות פעילות כרגע.")
             return
             
-        txt = "📋 <b>ההתראות הפעילות שלך:</b>\n\n"
-        for i, a in enumerate(alerts, 1):
-            cond_str = "מעל" if a['direction'].lower() == "above" else "מתחת ל-"
-            txt += f"{i}. 📈 <b>{a['symbol']}</b> - 🎯 {cond_str} <b>${float(a['target_price']):.2f}</b>\n   🆔 ID: <code>{a['id']}</code>\n\n"
+        header = "📋 <b>ההתראות הפעילות שלך:</b>\n\n"
+        current_msg = header
         
-        await message.answer(txt)
+        for i, a in enumerate(alerts, 1):
+            if a['direction'] == "SMA_TOUCH":
+                period = int(float(a['target_price']))
+                alert_text = f"{i}. 📈 <b>{a['symbol']}</b> - 🎯 בקרבת <b>SMA {period}</b>\n   🆔 ID: <code>{a['id']}</code>\n\n"
+            elif a['direction'].startswith("SMA_"):
+                period = int(float(a['target_price']))
+                dir_type = "מעל" if "ABOVE" in a['direction'] else "מתחת ל-"
+                alert_text = f"{i}. 📈 <b>{a['symbol']}</b> - 🎯 {dir_type} <b>SMA {period}</b>\n   🆔 ID: <code>{a['id']}</code>\n\n"
+            else:
+                cond_str = "מעל" if a['direction'].lower() == "above" else "מתחת ל-"
+                alert_text = f"{i}. 📈 <b>{a['symbol']}</b> - 🎯 {cond_str} <b>${float(a['target_price']):.2f}</b>\n   🆔 ID: <code>{a['id']}</code>\n\n"
+            
+            # Telegram has a limit of 4096 characters. We use 4000 to be safe.
+            if len(current_msg) + len(alert_text) > 4000:
+                await message.answer(current_msg)
+                current_msg = alert_text # Start new message with this alert
+            else:
+                current_msg += alert_text
+        
+        # Send the last (or only) message
+        if current_msg:
+            await message.answer(current_msg)
 
 @dp.message(lambda msg: msg.text and re.match(r'^(del|delete|remove)\s+(\d+)$', msg.text, re.IGNORECASE))
 async def cmd_del(message: Message):
@@ -227,9 +275,40 @@ async def cmd_search(message: Message):
     txt = "🔎 <b>תוצאות חיפוש:</b>\n\n" + "\n".join(results) + f"\n\nכדי להוסיף התראה, כתוב את הסימול והמחיר. (למשל: <code>{first_symbol} 150</code>)"
     await wait_msg.edit_text(txt)
 
-@dp.message(lambda msg: msg.text and re.match(r'^(?:add\s+)?([A-Za-z0-9^.-]+)\s+([\d.]+)$', msg.text, re.IGNORECASE))
+@dp.message(lambda msg: msg.text and re.match(r'^\s*(?:add\s+)?([A-Za-z0-9^.-]+)\s+SMA\s+(\d+)\s*$', msg.text, re.IGNORECASE))
+async def cmd_add_sma(message: Message):
+    logger.info(f"Received SMA alert request: {message.text}")
+    match = re.match(r'^\s*(?:add\s+)?([A-Za-z0-9^.-]+)\s+SMA\s+(\d+)\s*$', message.text, re.IGNORECASE)
+    symbol = match.group(1).upper()
+    period = int(match.group(2))
+    
+    global db_pool
+    if not db_pool: 
+        logger.error("DB Pool is None in cmd_add_sma")
+        return
+    
+    async with db_pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT id FROM users WHERE telegram_chat_id = $1", str(message.chat.id))
+        if not user:
+            await message.answer("החשבון שלך אינו מקושר. נא קשר אותו דרך האתר.")
+            return
+
+        direction = "SMA_TOUCH"
+        
+        # We store period in target_price
+        await conn.execute(
+            """INSERT INTO price_alerts 
+               (symbol, target_price, direction, is_active, created_at, user_id) 
+               VALUES ($1, $2, $3, true, NOW(), $4)""",
+            symbol, float(period), direction, user['id']
+        )
+        
+        await message.answer(f"✅ <b>התראה נוספה!</b>\n\n📈 מניה: <b>{symbol}</b>\n🎯 יעד: <b>בקרבת SMA {period}</b>")
+
+@dp.message(lambda msg: msg.text and re.match(r'^\s*(?:add\s+)?([A-Za-z0-9^.-]+)\s+([\d.]+)\s*$', msg.text, re.IGNORECASE))
 async def cmd_add(message: Message):
-    match = re.match(r'^(?:add\s+)?([A-Za-z0-9^.-]+)\s+([\d.]+)$', message.text, re.IGNORECASE)
+    logger.info(f"Received regular alert request: {message.text}")
+    match = re.match(r'^\s*(?:add\s+)?([A-Za-z0-9^.-]+)\s+([\d.]+)\s*$', message.text, re.IGNORECASE)
     symbol = match.group(1).upper()
     try:
         target_price = float(match.group(2))
@@ -279,17 +358,132 @@ async def auto_catch_all(message: Message):
 # ==========================================
 # Scheduler Job
 # ==========================================
+# def is_market_open():
+#     """
+#     Checks if the US Stock Market (NYSE/NASDAQ) is currently open.
+#     Hours: Mon-Fri, 9:30 AM - 4:00 PM ET.
+#     """
+#     tz = pytz.timezone('US/Eastern')
+#     now = datetime.now(tz)
+#     
+#     # Check if it's a weekday (0=Monday, 6=Sunday)
+#     if now.weekday() > 4:
+#         return False
+#         
+#     # Check if within 9:30 AM - 4:00 PM
+#     market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+#     market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+#     
+#     return market_open <= now <= market_close
+
+async def check_single_alert(alert):
+    """
+    Checks a single stock alert and sends a notification if triggered.
+    This runs in the background to avoid blocking other operations.
+    """
+    global db_pool, bot
+    alert_id = alert['id']
+    symbol = alert['symbol']
+    threshold = float(alert['target_price'])
+    condition = alert['direction']
+    chat_id = alert['telegram_chat_id']
+    
+    try:
+        if condition.startswith("SMA_"):
+            period = int(float(threshold))
+            # For SMA we need more than 1 day of data. 2y is safe for SMA 200.
+            def fetch_sma():
+                stock = yf.Ticker(symbol)
+                # period="2y" to be safe for 200 SMA, interval="1d"
+                hist = stock.history(period="2y")
+                if len(hist) < period:
+                    return None, None
+                
+                sma = hist['Close'].rolling(window=period).mean().iloc[-1]
+                current = hist['Close'].iloc[-1]
+                return float(sma), float(current)
+
+            sma_val, current_price = await asyncio.to_thread(fetch_sma)
+            
+            if sma_val is None:
+                logger.warning(f"Could not calculate SMA {period} for {symbol}")
+                return
+            
+            threshold = sma_val # Overwrite threshold with SMA value for logic below
+        else:
+            # Use our existing async price fetcher (it handles threading and fallback)
+            current_price = await get_current_price(symbol)
+        
+        if current_price is None:
+            logger.warning(f"Could not retrieve price data for {symbol}")
+            return
+            
+        logger.info(f"{symbol} current price: {current_price:.2f} | DB Threshold: {threshold} ({condition})")
+        
+        # Check conditions
+        triggered = False
+        if condition == "SMA_TOUCH":
+            # Trigger if within 0.5% range
+            diff_pct = abs(current_price - threshold) / threshold
+            if diff_pct <= 0.005: # 0.5%
+                triggered = True
+                condition_msg = "Price is near"
+            else:
+                return # Don't log/proceed if not triggered for SMA_TOUCH to save logs
+        elif condition.lower() == "above" and current_price >= threshold:
+            triggered = True
+            condition_msg = "crossed above"
+        elif condition.lower() == "below" and current_price <= threshold:
+            triggered = True
+            condition_msg = "crossed below"
+        elif condition == "SMA_ABOVE" and current_price >= threshold:
+            triggered = True
+            condition_msg = "is above"
+        elif condition == "SMA_BELOW" and current_price <= threshold:
+            triggered = True
+            condition_msg = "is below"
+            
+        if triggered:
+            # Send message using Telegram Bot
+            display_condition = f"SMA {int(float(alert['target_price']))}" if condition.startswith("SMA_") else f"${threshold:.2f}"
+            msg = (
+                f"🚨 <b>Stock Limit Reached!</b> 🚨\n\n"
+                f"📈 <b>{symbol}</b> {condition_msg} your target.\n"
+                f"💰 Current Price: <b>${current_price:.2f}</b>\n"
+                f"🎯 Target Set: <b>{display_condition}</b>"
+            )
+            
+            try:
+                await bot.send_message(chat_id=chat_id, text=msg)
+                logger.info(f"Alert sent to chat_id={chat_id} for {symbol}!")
+                
+                # Mark the alert as inactive so it doesn't fire again immediately
+                async with db_pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE price_alerts SET is_active = false, alert_date = NOW() WHERE id = $1",
+                        alert_id
+                    )
+            except (TelegramBadRequest, TelegramForbiddenError) as e:
+                logger.error(f"Telegram error sending to {chat_id}: {e}")
+                
+    except Exception as e:
+        logger.error(f"Error checking {symbol}: {e}")
+
 async def check_stocks_and_notify():
     global db_pool
     if db_pool is None:
         logger.error("Database pool is not initialized.")
         return
 
+#    if not is_market_open():
+#        logger.info("Market is currently closed. Skipping check.")
+#        return
+
     logger.info("Scheduler tick: Checking active stocks from DB...")
     
     try:
         async with db_pool.acquire() as conn:
-            # Query active alerts joined with users table to get telegram_chat_id
+            # Get all active alerts
             query = """
                 SELECT 
                     p.id, p.symbol, p.target_price, p.direction, p.user_id,
@@ -302,67 +496,15 @@ async def check_stocks_and_notify():
             """
             alerts = await conn.fetch(query)
             
-            if not alerts:
-                logger.info("No active alerts to check.")
-                return
+        if not alerts:
+            logger.info("No active alerts to check.")
+            return
                 
-            for alert in alerts:
-                alert_id = alert['id']
-                symbol = alert['symbol']
-                threshold = float(alert['target_price'])
-                condition = alert['direction']
-                chat_id = alert['telegram_chat_id']
-                
-                try:
-                    # Fetch latest data from yfinance efficiently
-                    stock = yf.Ticker(symbol)
-                    
-                    # Try using fast_info first (faster), fallback to history if needed
-                    current_price = None
-                    stock_info = stock.fast_info
-                    if 'last_price' in stock_info and stock_info['last_price'] is not None:
-                        current_price = stock_info['last_price']
-                    else:
-                        history = stock.history(period="1d")
-                        if not history.empty:
-                            current_price = float(history['Close'].iloc[-1])
-                            
-                    if current_price is None:
-                        logger.warning(f"Could not retrieve price data for {symbol}")
-                        continue
-                        
-                    logger.info(f"{symbol} current price: {current_price:.2f} | DB Threshold: {threshold} ({condition})")
-                    
-                    # Check conditions
-                    triggered = False
-                    if condition.lower() == "above" and current_price >= threshold:
-                        triggered = True
-                    elif condition.lower() == "below" and current_price <= threshold:
-                        triggered = True
-                        
-                    if triggered:
-                        # Send message using Telegram Bot
-                        msg = (
-                            f"🚨 <b>Stock Limit Reached!</b> 🚨\n\n"
-                            f"📈 <b>{symbol}</b> has crossed your target.\n"
-                            f"💰 Current Price: <b>${current_price:.2f}</b>\n"
-                            f"🎯 Target Set: <b>${threshold:.2f}</b> ({condition})"
-                        )
-                        
-                        try:
-                            await bot.send_message(chat_id=chat_id, text=msg)
-                            logger.info(f"Alert sent to chat_id={chat_id} for {symbol}!")
-                            
-                            # Mark the alert as inactive and update alert_date so it doesn't spam
-                            await conn.execute(
-                                "UPDATE price_alerts SET is_active = false, alert_date = NOW() WHERE id = $1",
-                                alert_id
-                            )
-                        except (TelegramBadRequest, TelegramForbiddenError) as e:
-                            logger.error(f"Telegram error sending to {chat_id}: {e}")
-                            
-                except Exception as e:
-                    logger.error(f"Error checking {symbol}: {e}")
+        # Run all checks concurrently. 
+        # await asyncio.gather ensures this function only completes once all stocks are checked,
+        # but IT DOES NOT BLOCK the bot from responding because it's using async/await.
+        tasks = [check_single_alert(alert) for alert in alerts]
+        await asyncio.gather(*tasks)
                     
     except Exception as e:
         logger.error(f"Database error during check_stocks: {e}")
@@ -379,6 +521,9 @@ async def on_startup():
     
     # Initialize DB connection pool
     try:
+        # Check if we should use SSL based on environment (local vs production)
+        ssl_mode = "require" if "localhost" not in DB_HOST else None
+        
         db_pool = await asyncpg.create_pool(
             host=DB_HOST,
             port=DB_PORT,
@@ -387,10 +532,10 @@ async def on_startup():
             password=DB_PASSWORD,
             min_size=1,
             max_size=10,
-            ssl="require",
+            ssl=ssl_mode,
             statement_cache_size=0
         )
-        logger.info("Database connection pool created successfully.")
+        logger.info(f"Database connection pool created successfully (SSL: {ssl_mode}).")
     except Exception as e:
         logger.error(f"Failed to create database pool: {e}")
     
