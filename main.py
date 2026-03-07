@@ -15,8 +15,8 @@ import asyncpg
 from dotenv import load_dotenv
 import re
 import requests
-# from datetime import datetime
-# import pytz
+from datetime import datetime
+import pytz
 
 # Load environment variables from .env file if present
 load_dotenv()
@@ -358,23 +358,23 @@ async def auto_catch_all(message: Message):
 # ==========================================
 # Scheduler Job
 # ==========================================
-# def is_market_open():
-#     """
-#     Checks if the US Stock Market (NYSE/NASDAQ) is currently open.
-#     Hours: Mon-Fri, 9:30 AM - 4:00 PM ET.
-#     """
-#     tz = pytz.timezone('US/Eastern')
-#     now = datetime.now(tz)
-#     
-#     # Check if it's a weekday (0=Monday, 6=Sunday)
-#     if now.weekday() > 4:
-#         return False
-#         
-#     # Check if within 9:30 AM - 4:00 PM
-#     market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
-#     market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
-#     
-#     return market_open <= now <= market_close
+def is_market_open():
+    """
+    Checks if the US Stock Market (NYSE/NASDAQ) is currently open.
+    Hours: Mon-Fri, 9:30 AM - 4:00 PM ET.
+    """
+    tz = pytz.timezone('US/Eastern')
+    now = datetime.now(tz)
+    
+    # Check if it's a weekday (0=Monday, 6=Sunday)
+    if now.weekday() > 4:
+        return False
+        
+    # Check if within 9:30 AM - 4:00 PM
+    market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    
+    return market_open <= now <= market_close
 
 async def check_single_alert(alert):
     """
@@ -475,9 +475,9 @@ async def check_stocks_and_notify():
         logger.error("Database pool is not initialized.")
         return
 
-#    if not is_market_open():
-#        logger.info("Market is currently closed. Skipping check.")
-#        return
+    if not is_market_open():
+        logger.info("Market is currently closed. Skipping check.")
+        return
 
     logger.info("Scheduler tick: Checking active stocks from DB...")
     
@@ -505,7 +505,6 @@ async def check_stocks_and_notify():
         # but IT DOES NOT BLOCK the bot from responding because it's using async/await.
         tasks = [check_single_alert(alert) for alert in alerts]
         await asyncio.gather(*tasks)
-                    
     except Exception as e:
         logger.error(f"Database error during check_stocks: {e}")
 
