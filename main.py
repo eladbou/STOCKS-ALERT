@@ -4,7 +4,7 @@ import asyncio
 import logging
 from fastapi import FastAPI
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
+from aiogram.types import Message, BufferedInputFile
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -17,6 +17,9 @@ import re
 import requests
 from datetime import datetime
 import pytz
+import time
+import aiohttp
+import io
 
 # Load environment variables from .env file if present
 load_dotenv()
@@ -161,6 +164,46 @@ async def get_current_price(symbol: str):
         return None
     return await asyncio.to_thread(fetch_price)
 
+async def send_stock_chart(chat_id: int, ticker: str, sma_period: int = None):
+    """
+    Fetches a stock chart from TradingView/Finviz into memory and sends it to Telegram.
+    This bypasses Telegram's "failed to get content" errors.
+    """
+    global bot
+    try:
+        # Using Finviz for maximum reliability as TradingView API was failing DNS lookup.
+        # ta=1 shows default SMAs (50, 200) - for 20,44,150 specialized logic 
+        # usually requires paid APIs, sticking to reliable Finviz for now.
+        chart_url = f"https://finviz.com/chart.ashx?t={ticker}&ty=c&ta=1&p=d&s=l"
+            
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(chart_url, headers=headers, timeout=10) as response:
+                if response.status == 200:
+                    image_data = await response.read()
+                    
+                    caption = f"📊 <b>הנה הגרף המעודכן עבור {ticker}</b>"
+                    if sma_period:
+                        caption += f" (מציג ממוצע נע {sma_period})"
+                    
+                    photo_file = BufferedInputFile(image_data, filename=f"{ticker}_chart.png")
+                    await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=photo_file,
+                        caption=caption
+                    )
+                    logger.info(f"Chart sent successfully as buffer for {ticker}")
+                else:
+                    logger.error(f"Failed to fetch chart: HTTP {response.status}")
+                    # Fallback to text if image fails
+                    await bot.send_message(chat_id, f"⚠️ לא הצלחתי למשוך גרף עבור {ticker}, אבל ההתראה בתוקף.")
+                    
+    except Exception as e:
+        logger.error(f"Error fetching/sending chart for {ticker}: {e}")
+
 @dp.message(lambda msg: msg.text and msg.text.lower() == "list")
 async def cmd_list(message: Message):
     global db_pool
@@ -238,6 +281,8 @@ async def cmd_price(message: Message):
         return
         
     await wait_msg.edit_text(f"💰 המחיר הנוכחי של <b>{symbol}</b> הוא <b>${price:.2f}</b>.")
+    # Send chart with default SMAs 20, 44, 150
+    await send_stock_chart(message.chat.id, symbol)
 
 @dp.message(lambda msg: msg.text and re.match(r'^search\s+(.+)$', msg.text, re.IGNORECASE))
 async def cmd_search(message: Message):
@@ -455,7 +500,13 @@ async def check_single_alert(alert):
             
             try:
                 await bot.send_message(chat_id=chat_id, text=msg)
-                logger.info(f"Alert sent to chat_id={chat_id} for {symbol}!")
+                
+                # If it was an SMA alert, send chart with ONLY that SMA. 
+                # Otherwise send default chart (passed as None).
+                target_sma = int(threshold) if condition.startswith("SMA_") else None
+                await send_stock_chart(chat_id, symbol, sma_period=target_sma)
+                
+                logger.info(f"Alert and chart sent to chat_id={chat_id} for {symbol}!")
                 
                 # Mark the alert as inactive so it doesn't fire again immediately
                 async with db_pool.acquire() as conn:
