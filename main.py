@@ -144,6 +144,10 @@ async def cmd_help(message: Message):
         "🔍 <b>מידע וחיפוש</b>\n"
         "• <code>price [SYMBOL]</code> - קבלת מחיר נוכחי ומהיר\n"
         "• <code>search [NAME]</code> - חיפוש סימול לפי שם חברה (בעברית/אנגלית)\n\n"
+        "🪙 <b>חדש! תמיכה בקריפטו (24/7)</b>\n"
+        "• ניתן להוסיף התראות למטבעות קריפטו בפורמט <code>SYMBOL-USD</code>\n"
+        "  <i>לדוגמה: <code>BTC-USD 95000</code> או <code>ETH-USD 2500</code></i>\n"
+        "  התראות קריפטו פעילות 24/7 ללא תלות בשעות הבורסה!\n\n"
         "💡 <b>טיפ:</b> ניתן להוסיף התראה רגילה פשוט על ידי כתיבת שם המניה והמחיר, ללא המילה add."
     )
     await message.answer(help_text)
@@ -526,13 +530,13 @@ async def check_stocks_and_notify():
         logger.error("Database pool is not initialized.")
         return
 
-    if not is_market_open():
-        logger.info("Market is currently closed. Skipping check.")
-        return
+    # is_market_open check moved inside to allow crypto 24/7
 
     logger.info("Scheduler tick: Checking active stocks from DB...")
     
     try:
+        is_open = is_market_open()
+        
         async with db_pool.acquire() as conn:
             # Get all active alerts
             query = """
@@ -545,16 +549,31 @@ async def check_stocks_and_notify():
                   AND u.telegram_chat_id IS NOT NULL 
                   AND u.telegram_chat_id != ''
             """
-            alerts = await conn.fetch(query)
+            all_alerts = await conn.fetch(query)
             
-        if not alerts:
+        if not all_alerts:
             logger.info("No active alerts to check.")
+            return
+
+        # Filter alerts: Crypto runs 24/7, stocks only if market is open
+        alerts_to_check = []
+        for alert in all_alerts:
+            symbol = alert['symbol'].upper()
+            # Basic heuristic for crypto: ends with -USD, -EUR, -BTC or common crypto coins
+            is_crypto = "-" in symbol or any(coin in symbol for coin in ["BTC", "ETH", "SOL", "BNB", "DOGE"])
+            
+            if is_crypto or is_open:
+                alerts_to_check.append(alert)
+                
+        if not alerts_to_check:
+            if not is_open:
+                logger.info("Market is closed and no crypto alerts to check. Skipping.")
+            else:
+                logger.info("No active alerts to check (filtered).")
             return
                 
         # Run all checks concurrently. 
-        # await asyncio.gather ensures this function only completes once all stocks are checked,
-        # but IT DOES NOT BLOCK the bot from responding because it's using async/await.
-        tasks = [check_single_alert(alert) for alert in alerts]
+        tasks = [check_single_alert(alert) for alert in alerts_to_check]
         await asyncio.gather(*tasks)
     except Exception as e:
         logger.error(f"Database error during check_stocks: {e}")
