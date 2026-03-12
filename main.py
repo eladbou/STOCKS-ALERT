@@ -136,6 +136,7 @@ async def cmd_help(message: Message):
         "• <code>[SYMBOL] [PRICE]</code> - הוספת התראה למחיר ספציפי\n"
         "  <i>לדוגמה: <code>AAPL 230</code></i>\n"
         "• <code>list</code> - הצגת כל ההתראות הפעילות שלך\n"
+        "• <code>list [SYMBOL]</code> - הצגת התראות למניה ספציפית\n"
         "• <code>del [ID]</code> - מחיקת התראה (השתמש ב-ID מפקודת list)\n\n"
         "📊 <b>חדש! התראות ממוצע נע (SMA) בשביל ארביבון</b>\n"
         "• <code>add [SYMBOL] SMA [PERIOD]</code> - התראה כשהמחיר נוגע בממוצע\n"
@@ -208,8 +209,11 @@ async def send_stock_chart(chat_id: int, ticker: str, sma_period: int = None):
     except Exception as e:
         logger.error(f"Error fetching/sending chart for {ticker}: {e}")
 
-@dp.message(lambda msg: msg.text and msg.text.lower() == "list")
+@dp.message(lambda msg: msg.text and re.match(r'^list(?:\s+([A-Za-z0-9^.-]+))?$', msg.text, re.IGNORECASE))
 async def cmd_list(message: Message):
+    match = re.match(r'^list(?:\s+([A-Za-z0-9^.-]+))?$', message.text, re.IGNORECASE)
+    symbol_filter = match.group(1).upper() if match.group(1) else None
+
     global db_pool
     async with db_pool.acquire() as conn:
         user = await conn.fetchrow("SELECT id FROM users WHERE telegram_chat_id = $1", str(message.chat.id))
@@ -217,16 +221,28 @@ async def cmd_list(message: Message):
             await message.answer("החשבון שלך אינו מקושר. לא ניתן לראות רשימת התראות.")
             return
             
-        alerts = await conn.fetch(
-            "SELECT id, symbol, target_price, direction, TO_CHAR(created_at, 'DD/MM/YYYY HH24:MI') as date FROM price_alerts WHERE user_id = $1 AND is_active = true ORDER BY created_at DESC",
-            user['id']
-        )
+        if symbol_filter:
+            alerts = await conn.fetch(
+                "SELECT id, symbol, target_price, direction, TO_CHAR(created_at, 'DD/MM/YYYY HH24:MI') as date FROM price_alerts WHERE user_id = $1 AND is_active = true AND symbol = $2 ORDER BY created_at DESC",
+                user['id'], symbol_filter
+            )
+        else:
+            alerts = await conn.fetch(
+                "SELECT id, symbol, target_price, direction, TO_CHAR(created_at, 'DD/MM/YYYY HH24:MI') as date FROM price_alerts WHERE user_id = $1 AND is_active = true ORDER BY created_at DESC",
+                user['id']
+            )
         
         if not alerts:
-            await message.answer("אין לך התראות פעילות כרגע.")
+            if symbol_filter:
+                await message.answer(f"אין לך התראות פעילות עבור <b>{symbol_filter}</b> כרגע.")
+            else:
+                await message.answer("אין לך התראות פעילות כרגע.")
             return
             
-        header = "📋 <b>ההתראות הפעילות שלך:</b>\n\n"
+        if symbol_filter:
+            header = f"📋 <b>ההתראות הפעילות שלך עבור {symbol_filter}:</b>\n\n"
+        else:
+            header = "📋 <b>ההתראות הפעילות שלך:</b>\n\n"
         current_msg = header
         
         for i, a in enumerate(alerts, 1):
