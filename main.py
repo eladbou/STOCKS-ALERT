@@ -370,16 +370,32 @@ async def cmd_add_sma(message: Message):
         
         await message.answer(f"✅ <b>התראה נוספה!</b>\n\n📈 מניה: <b>{symbol}</b>\n🎯 יעד: <b>בקרבת SMA {period}</b>")
 
-@dp.message(lambda msg: msg.text and re.match(r'^\s*(?:add\s+)?([A-Za-z0-9^.-]+)\s+([\d.]+)\s*$', msg.text, re.IGNORECASE))
+@dp.message(lambda msg: msg.text and re.match(r'^\s*(?:add\s+)?([A-Za-z0-9^.-]+)\s+([\d.\s,]+)$', msg.text, re.IGNORECASE))
 async def cmd_add(message: Message):
     logger.info(f"Received regular alert request: {message.text}")
-    match = re.match(r'^\s*(?:add\s+)?([A-Za-z0-9^.-]+)\s+([\d.]+)\s*$', message.text, re.IGNORECASE)
-    symbol = match.group(1).upper()
-    try:
-        target_price = float(match.group(2))
-    except ValueError:
-        await message.answer("אנא הזן מחיר תקין.")
+    if re.search(r'\bSMA\b', message.text, re.IGNORECASE):
         return
+        
+    match = re.match(r'^\s*(?:add\s+)?([A-Za-z0-9^.-]+)\s+([\d.\s,]+)$', message.text, re.IGNORECASE)
+    if not match:
+        return
+        
+    symbol = match.group(1).upper()
+    prices_str = match.group(2)
+    
+    raw_prices = prices_str.replace(',', ' ').split()
+    target_prices = []
+    for p in raw_prices:
+        try:
+            target_prices.append(float(p))
+        except ValueError:
+            pass
+            
+    if not target_prices:
+        await message.answer("אנא הזן מחירים תקינים.")
+        return
+        
+    target_prices = list(set(target_prices))
     
     global db_pool
     if not db_pool:
@@ -391,29 +407,36 @@ async def cmd_add(message: Message):
             await message.answer("החשבון שלך אינו מקושר. לא ניתן להוסיף התראות. נא קשר אותו דרך האתר לחוויה מלאה.")
             return
             
-        wait_msg = await message.answer("⏳ בודק מחיר עדכני למניה כדי לקבוע כיוון התראה...")
+        wait_msg = await message.answer(f"⏳ בודק מחיר עדכני למניה <b>{symbol}</b>...")
         
         current_price = await get_current_price(symbol)
         if current_price is None:
-            await wait_msg.edit_text(f"❌ לא הצלחתי למצוא נתונים עבור הסימול <b>{symbol}</b>. התראה לא נשמרה.\nנסה לחפש את המניה קודם באמצעות: <code>search {symbol}</code>")
+            await wait_msg.edit_text(f"❌ לא הצלחתי למצוא נתונים עבור הסימול <b>{symbol}</b>. התראות לא נשמרו.\nנסה לחפש את המניה קודם באמצעות: <code>search {symbol}</code>")
             return
             
-        direction = "above" if target_price > current_price else "below"
+        results = []
+        for target_price in target_prices:
+            direction = "above" if target_price > current_price else "below"
+            
+            # INSERT to db
+            await conn.execute(
+                """INSERT INTO price_alerts 
+                   (symbol, target_price, direction, is_active, created_at, user_id) 
+                   VALUES ($1, $2, $3, true, NOW(), $4)""",
+                symbol, target_price, direction, user['id']
+            )
+            
+            cond_str = "מעל" if direction == "above" else "מתחת ל-"
+            results.append(f"🎯 <b>{cond_str} ${target_price:.2f}</b>")
+            
+        targets_msg = "\n".join(results)
+        success_title = "✅ <b>התראות נוספו בהצלחה!</b>" if len(target_prices) > 1 else "✅ <b>התראה נוספה בהצלחה!</b>"
         
-        # INSERT to db
-        await conn.execute(
-            """INSERT INTO price_alerts 
-               (symbol, target_price, direction, is_active, created_at, user_id) 
-               VALUES ($1, $2, $3, true, NOW(), $4)""",
-            symbol, target_price, direction, user['id']
-        )
-        
-        cond_str = "מעל" if direction == "above" else "מתחת ל-"
         await wait_msg.edit_text(
-            f"✅ <b>התראה נוספה בהצלחה!</b>\n\n"
+            f"{success_title}\n\n"
             f"📈 מניה: <b>{symbol}</b>\n"
-            f"💰 מחיר נוכחי בעת הוספה: <b>${current_price:.2f}</b>\n"
-            f"🎯 יעד התראה: <b>{cond_str} ${target_price:.2f}</b>"
+            f"💰 מחיר נוכחי בעת הוספה: <b>${current_price:.2f}</b>\n\n"
+            f"יעדים:\n{targets_msg}"
         )
 
 @dp.message(F.text.lower() == "revive")
