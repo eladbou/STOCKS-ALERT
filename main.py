@@ -450,20 +450,44 @@ async def cmd_revive_alerts(message: Message):
         if not user:
             return
             
-        res = await conn.execute(
-            "UPDATE price_alerts SET is_active = true WHERE user_id = $1 AND is_active = false",
+        alerts = await conn.fetch(
+            "SELECT id, symbol, target_price, direction FROM price_alerts WHERE user_id = $1 AND is_active = false",
             user['id']
         )
         
-        try:
-            count = int(res.split()[1])
-        except IndexError:
-            count = 0
-            
-        if count > 0:
-            await message.answer(f"🤫 <b>פקודה סודית הופעלה!</b>\n{count} התראות שקפצו בעבר הופעלו מחדש.")
-        else:
+        if not alerts:
             await message.answer("🤫 <b>פקודה סודית הופעלה!</b>\nלא היו התראות כבויות להפעיל.")
+            return
+            
+        wait_msg = await message.answer("⏳ הפקודה הסודית מתבצעת...\nבודק מחירים נוכחיים ומעדכן את כיוון ההתראות (מעל/מתחת)...")
+        
+        symbols_to_fetch = set([a['symbol'] for a in alerts if not a['direction'].startswith("SMA")])
+        prices = {}
+        for sym in symbols_to_fetch:
+            price = await get_current_price(sym)
+            if price is not None:
+                prices[sym] = price
+                
+        count = 0
+        for a in alerts:
+            if a['direction'].startswith("SMA"):
+                await conn.execute("UPDATE price_alerts SET is_active = true WHERE id = $1", a['id'])
+                count += 1
+            else:
+                current_price = prices.get(a['symbol'])
+                if current_price is not None:
+                    new_direction = "above" if float(a['target_price']) > current_price else "below"
+                    await conn.execute(
+                        "UPDATE price_alerts SET is_active = true, direction = $1 WHERE id = $2",
+                        new_direction, a['id']
+                    )
+                    count += 1
+                else:
+                    # Fallback to old direction if price fetch failed
+                    await conn.execute("UPDATE price_alerts SET is_active = true WHERE id = $1", a['id'])
+                    count += 1
+                    
+        await wait_msg.edit_text(f"🤫 <b>פקודה סודית הושלמה!</b>\n{count} התראות שקפצו בעבר הופעלו מחדש ועודכנו לפי המחיר הנוכחי בשוק.")
 
 @dp.message()
 async def auto_catch_all(message: Message):
