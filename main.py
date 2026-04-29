@@ -416,6 +416,32 @@ async def cmd_add(message: Message):
             f"🎯 יעד התראה: <b>{cond_str} ${target_price:.2f}</b>"
         )
 
+@dp.message(F.text.lower() == "revive")
+async def cmd_revive_alerts(message: Message):
+    global db_pool
+    if not db_pool:
+        return
+        
+    async with db_pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT id FROM users WHERE telegram_chat_id = $1", str(message.chat.id))
+        if not user:
+            return
+            
+        res = await conn.execute(
+            "UPDATE price_alerts SET is_active = true WHERE user_id = $1 AND is_active = false",
+            user['id']
+        )
+        
+        try:
+            count = int(res.split()[1])
+        except IndexError:
+            count = 0
+            
+        if count > 0:
+            await message.answer(f"🤫 <b>פקודה סודית הופעלה!</b>\n{count} התראות שקפצו בעבר הופעלו מחדש.")
+        else:
+            await message.answer("🤫 <b>פקודה סודית הופעלה!</b>\nלא היו התראות כבויות להפעיל.")
+
 @dp.message()
 async def auto_catch_all(message: Message):
     await message.answer("לא זיהיתי את הפקודה...\nשלח <code>help</code> כדי לראות את הפקודות הזמינות.")
