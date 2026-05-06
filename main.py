@@ -604,7 +604,7 @@ async def check_single_alert(alert):
                 # Mark the alert as inactive so it doesn't fire again immediately
                 async with db_pool.acquire() as conn:
                     await conn.execute(
-                        "UPDATE price_alerts SET is_active = false, alert_date = NOW() WHERE id = $1",
+                        "UPDATE price_alerts SET is_active = false, triggered_at = NOW() WHERE id = $1",
                         alert_id
                     )
             except (TelegramBadRequest, TelegramForbiddenError) as e:
