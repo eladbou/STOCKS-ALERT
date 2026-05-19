@@ -10,6 +10,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 import yfinance as yf
 import asyncpg
 from dotenv import load_dotenv
@@ -149,7 +150,10 @@ async def cmd_help(message: Message):
         "• ניתן להוסיף התראות למטבעות קריפטו בפורמט <code>SYMBOL-USD</code>\n"
         "  <i>לדוגמה: <code>BTC-USD 95000</code> או <code>ETH-USD 2500</code></i>\n"
         "  התראות קריפטו פעילות 24/7 ללא תלות בשעות הבורסה!\n\n"
-        "💡 <b>טיפ:</b> ניתן להוסיף התראה רגילה פשוט על ידי כתיבת שם המניה והמחיר, ללא המילה add."
+        "💡 <b>טיפ:</b> ניתן להוסיף התראה רגילה פשוט על ידי כתיבת שם המניה והמחיר, ללא המילה add.\n\n"
+        "📈 <b>סיכומים</b>\n"
+        "• <code>digest</code> - קבל סיכום שבועי של עסקאות ורווח/הפסד עכשיו\n"
+        "  (נשלח אוטומטית כל יום ראשון ב-20:00 ET)"
     )
     await message.answer(help_text)
 
@@ -489,6 +493,22 @@ async def cmd_revive_alerts(message: Message):
                     
         await wait_msg.edit_text(f"🤫 <b>פקודה סודית הושלמה!</b>\n{count} התראות שקפצו בעבר הופעלו מחדש ועודכנו לפי המחיר הנוכחי בשוק.")
 
+@dp.message(Command("digest"))
+@dp.message(F.text.lower() == "digest")
+async def cmd_digest(message: Message):
+    global db_pool
+    if not db_pool:
+        await message.answer("שגיאה בהתחברות למסד הנתונים.")
+        return
+    async with db_pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT id FROM users WHERE telegram_chat_id = $1", str(message.chat.id))
+    if not user:
+        await message.answer("החשבון שלך אינו מקושר. שלח /start [token] כדי לחבר.")
+        return
+    await message.answer("⏳ מכין סיכום שבועי...")
+    await send_weekly_digest()
+
+
 @dp.message()
 async def auto_catch_all(message: Message):
     await message.answer("לא זיהיתי את הפקודה...\nשלח <code>help</code> כדי לראות את הפקודות הזמינות.")
@@ -613,6 +633,190 @@ async def check_single_alert(alert):
     except Exception as e:
         logger.error(f"Error checking {symbol}: {e}")
 
+async def send_daily_pnl_digest():
+    """Sends daily P&L summary to all users with open positions at market close (4:30 PM ET Mon–Fri)."""
+    global db_pool, bot
+    if not db_pool:
+        return
+    logger.info("Running daily P&L digest...")
+
+    async with db_pool.acquire() as conn:
+        users = await conn.fetch("""
+            SELECT DISTINCT u.id, u.username, u.telegram_chat_id
+            FROM users u
+            INNER JOIN trades_journal tj ON tj.user_id = u.id
+            WHERE u.telegram_chat_id IS NOT NULL
+              AND u.telegram_chat_id != ''
+              AND tj.status = 'open'
+        """)
+
+    for user in users:
+        try:
+            async with db_pool.acquire() as conn:
+                trades = await conn.fetch(
+                    "SELECT id, symbol FROM trades_journal WHERE user_id = $1 AND status = 'open'",
+                    user['id']
+                )
+                exec_rows = await conn.fetch("""
+                    SELECT te.trade_id, te.execution_type, te.price, te.quantity
+                    FROM trade_executions te
+                    INNER JOIN trades_journal tj ON te.trade_id = tj.id
+                    WHERE tj.user_id = $1 AND tj.status = 'open'
+                """, user['id'])
+
+            positions = []
+            for trade in trades:
+                buy_qty = sum(float(e['quantity']) for e in exec_rows if e['trade_id'] == trade['id'] and e['execution_type'] == 'buy')
+                sell_qty = sum(float(e['quantity']) for e in exec_rows if e['trade_id'] == trade['id'] and e['execution_type'] == 'sell')
+                buy_val = sum(float(e['quantity']) * float(e['price']) for e in exec_rows if e['trade_id'] == trade['id'] and e['execution_type'] == 'buy')
+                net_qty = buy_qty - sell_qty
+                avg_entry = buy_val / buy_qty if buy_qty > 0 else 0
+                if net_qty > 0.0001:
+                    positions.append({'symbol': trade['symbol'], 'net_qty': net_qty, 'avg_entry': avg_entry})
+
+            if not positions:
+                continue
+
+            symbols = list({p['symbol'] for p in positions})
+
+            def fetch_prices(syms):
+                result = {}
+                for sym in syms:
+                    try:
+                        info = yf.Ticker(sym).fast_info
+                        result[sym] = {
+                            'current': float(getattr(info, 'last_price', 0) or 0),
+                            'prev_close': float(getattr(info, 'previous_close', 0) or 0),
+                        }
+                    except Exception:
+                        result[sym] = {'current': 0, 'prev_close': 0}
+                return result
+
+            price_data = await asyncio.to_thread(fetch_prices, symbols)
+
+            lines = []
+            total_today_pnl = 0.0
+            total_unrealized = 0.0
+
+            for p in positions:
+                pd = price_data.get(p['symbol'], {})
+                curr = pd.get('current', 0)
+                prev = pd.get('prev_close', 0)
+                if curr == 0:
+                    continue
+                today_pnl = (curr - prev) * p['net_qty']
+                unrealized = (curr - p['avg_entry']) * p['net_qty']
+                daily_pct = ((curr - prev) / prev * 100) if prev > 0 else 0
+                total_today_pnl += today_pnl
+                total_unrealized += unrealized
+                icon = "📈" if today_pnl >= 0 else "📉"
+                lines.append(
+                    f"{icon} <b>{p['symbol']}</b> ${curr:.2f} "
+                    f"({'%+.1f' % daily_pct}%) | יומי: <b>{'%+.0f' % today_pnl}$</b>"
+                )
+
+            if not lines:
+                continue
+
+            total_icon = "✅" if total_today_pnl >= 0 else "🔴"
+            msg = (
+                f"📊 <b>סיכום יומי — {user['username']}</b>\n\n"
+                + "\n".join(lines)
+                + f"\n\n{total_icon} <b>סה״כ יומי: {'%+.0f' % total_today_pnl}$</b>\n"
+                + f"📦 סה״כ לא ממומש: <b>{'%+.0f' % total_unrealized}$</b>"
+            )
+            await bot.send_message(chat_id=int(user['telegram_chat_id']), text=msg)
+            logger.info(f"Daily digest sent to {user['username']}")
+
+        except (TelegramBadRequest, TelegramForbiddenError) as e:
+            logger.error(f"Telegram error sending daily digest to {user['telegram_chat_id']}: {e}")
+        except Exception as e:
+            logger.error(f"Error sending daily digest for user {user['id']}: {e}")
+
+
+async def send_weekly_digest():
+    """Sends weekly trading summary to all users every Sunday at 8 PM ET."""
+    global db_pool, bot
+    if not db_pool:
+        return
+    logger.info("Running weekly digest...")
+
+    async with db_pool.acquire() as conn:
+        users = await conn.fetch("""
+            SELECT id, username, telegram_chat_id FROM users
+            WHERE telegram_chat_id IS NOT NULL AND telegram_chat_id != ''
+        """)
+
+    for user in users:
+        try:
+            async with db_pool.acquire() as conn:
+                closed_trades = await conn.fetch("""
+                    SELECT id, symbol FROM trades_journal
+                    WHERE user_id = $1 AND status = 'closed'
+                      AND exit_date >= NOW() - INTERVAL '7 days'
+                """, user['id'])
+
+                open_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM trades_journal WHERE user_id = $1 AND status = 'open'",
+                    user['id']
+                )
+
+                if not closed_trades and (open_count or 0) == 0:
+                    continue
+
+                trade_ids = [t['id'] for t in closed_trades]
+                exec_rows = []
+                if trade_ids:
+                    exec_rows = await conn.fetch("""
+                        SELECT trade_id, execution_type, price, quantity, fees
+                        FROM trade_executions WHERE trade_id = ANY($1::int[])
+                    """, trade_ids)
+
+            trade_pnls = []
+            for trade in closed_trades:
+                execs = [e for e in exec_rows if e['trade_id'] == trade['id']]
+                buy_val = sum(float(e['price']) * float(e['quantity']) for e in execs if e['execution_type'] == 'buy')
+                sell_val = sum(float(e['price']) * float(e['quantity']) for e in execs if e['execution_type'] == 'sell')
+                fees = sum(float(e['fees'] or 0) for e in execs)
+                pnl = sell_val - buy_val - fees
+                trade_pnls.append({'symbol': trade['symbol'], 'pnl': pnl})
+
+            total_pnl = sum(t['pnl'] for t in trade_pnls)
+            wins = [t for t in trade_pnls if t['pnl'] > 0]
+            losses = [t for t in trade_pnls if t['pnl'] <= 0]
+            win_rate = (len(wins) / len(trade_pnls) * 100) if trade_pnls else 0
+            best = max(trade_pnls, key=lambda t: t['pnl'], default=None)
+            worst = min(trade_pnls, key=lambda t: t['pnl'], default=None)
+
+            total_icon = "✅" if total_pnl >= 0 else "🔴"
+            lines = [f"📅 <b>סיכום שבועי — {user['username']}</b>\n"]
+
+            if trade_pnls:
+                lines.append(f"🔢 עסקאות סגורות השבוע: <b>{len(trade_pnls)}</b> ({len(wins)}✅ {len(losses)}❌)")
+                lines.append(f"🎯 אחוז הצלחה: <b>{win_rate:.0f}%</b>")
+                lines.append(f"{total_icon} רווח/הפסד שבועי: <b>{'%+.0f' % total_pnl}$</b>")
+                if best:
+                    lines.append(f"🏆 הטובה: <b>{best['symbol']}</b> {'%+.0f' % best['pnl']}$")
+                if worst and worst['pnl'] < 0:
+                    lines.append(f"💀 הגרועה: <b>{worst['symbol']}</b> {'%+.0f' % worst['pnl']}$")
+            else:
+                lines.append("לא נסגרו עסקאות השבוע.")
+
+            if (open_count or 0) > 0:
+                lines.append(f"\n📂 פוזיציות פתוחות כרגע: <b>{open_count}</b>")
+
+            await bot.send_message(
+                chat_id=int(user['telegram_chat_id']),
+                text="\n".join(lines)
+            )
+            logger.info(f"Weekly digest sent to {user['username']}")
+
+        except (TelegramBadRequest, TelegramForbiddenError) as e:
+            logger.error(f"Telegram error sending weekly digest to {user['telegram_chat_id']}: {e}")
+        except Exception as e:
+            logger.error(f"Error sending weekly digest for user {user['id']}: {e}")
+
+
 async def check_stocks_and_notify():
     global db_pool
     if db_pool is None:
@@ -702,6 +906,16 @@ async def on_startup():
     
     # 1. Start the Scheduler (runs every 30 seconds)
     scheduler.add_job(check_stocks_and_notify, 'interval', seconds=30)
+    # Daily P&L digest — weekdays at 4:30 PM ET
+    scheduler.add_job(
+        send_daily_pnl_digest,
+        CronTrigger(hour=16, minute=30, day_of_week='mon-fri', timezone='America/New_York')
+    )
+    # Weekly digest — Sundays at 8 PM ET
+    scheduler.add_job(
+        send_weekly_digest,
+        CronTrigger(day_of_week='sun', hour=20, timezone='America/New_York')
+    )
     scheduler.start()
     logger.info("APScheduler started.")
 
